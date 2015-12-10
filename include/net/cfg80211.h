@@ -2130,7 +2130,7 @@ struct wiphy_vendor_command {
 	struct nl80211_vendor_cmd_info info;
 	u32 flags;
 	int (*doit)(struct wiphy *wiphy, struct wireless_dev *wdev,
-		    void *data, int data_len);
+		    const void *data, int data_len);
 };
 
 /**
@@ -3302,8 +3302,8 @@ void __cfg80211_send_event_skb(struct sk_buff *skb, gfp_t gfp);
 static inline struct sk_buff *
 cfg80211_vendor_cmd_alloc_reply_skb(struct wiphy *wiphy, int approxlen)
 {
-	return __cfg80211_alloc_reply_skb(wiphy, NL80211_CMD_TESTMODE,
-					  NL80211_ATTR_TESTDATA, approxlen);
+	return __cfg80211_alloc_reply_skb(wiphy, NL80211_CMD_VENDOR,
+					  NL80211_ATTR_VENDOR_DATA, approxlen);
 }
 
 /**
@@ -3439,6 +3439,21 @@ cfg80211_testmode_alloc_event_skb(struct wiphy *wiphy, int approxlen, gfp_t gfp)
 	return __cfg80211_alloc_event_skb(wiphy, NL80211_CMD_TESTMODE,
 					  NL80211_ATTR_TESTDATA, -1,
 					  approxlen, gfp);
+}
+
+/**
+ * cfg80211_testmode_event - send the event
+ * @skb: The skb, must have been allocated with
+ *  cfg80211_testmode_alloc_event_skb()
+ * @gfp: allocation flags
+ *
+ * This function sends the given @skb, which must have been allocated
+ * by cfg80211_testmode_alloc_event_skb(), as an event. It always
+ * consumes it.
+ */
+static inline void cfg80211_testmode_event(struct sk_buff *skb, gfp_t gfp)
+{
+	__cfg80211_send_event_skb(skb, gfp);
 }
 
 #define CFG80211_TESTMODE_CMD(cmd)	.testmode_cmd = (cmd),

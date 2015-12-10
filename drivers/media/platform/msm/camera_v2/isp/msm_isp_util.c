@@ -413,7 +413,7 @@ long msm_isp_ioctl(struct v4l2_subdev *sd,
 		break;
 
 	default:
-		pr_err("%s: Invalid ISP command\n", __func__);
+		pr_err_ratelimited("%s: Invalid ISP command\n", __func__);
 		rc = -EINVAL;
 	}
 	return rc;
@@ -630,6 +630,33 @@ static int msm_isp_send_hw_cmd(struct vfe_device *vfe_dev,
 		}
 		break;
 	}
+	case VFE_HW_UPDATE_LOCK: {
+		uint32_t update_id =
+			vfe_dev->axi_data.src_info[VFE_PIX_0].last_updt_frm_id;
+		if (vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id != *cfg_data
+			|| update_id == *cfg_data) {
+			pr_err("hw update lock failed,acquire id %u\n",
+				*cfg_data);
+			pr_err("hw update lock failed,current id %lu\n",
+				vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id);
+			pr_err("hw update lock failed,last id %u\n",
+				update_id);
+			return -EINVAL;
+		}
+		break;
+	}
+	case VFE_HW_UPDATE_UNLOCK: {
+		if (vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id
+			!= *cfg_data) {
+			pr_err("hw update across frame boundary,begin id %u\n",
+				*cfg_data);
+			pr_err("hw update across frame boundary,end id %lu\n",
+				vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id);
+			vfe_dev->axi_data.src_info[VFE_PIX_0].last_updt_frm_id =
+			vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id;
+		}
+		break;
+	}
 	case VFE_READ: {
 		int i;
 		uint32_t *data_ptr = cfg_data +
@@ -682,7 +709,7 @@ int msm_isp_proc_cmd(struct vfe_device *vfe_dev, void *arg)
 	}
 
 	for (i = 0; i < proc_cmd->num_cfg; i++)
-		msm_isp_send_hw_cmd(vfe_dev, &reg_cfg_cmd[i],
+		rc = msm_isp_send_hw_cmd(vfe_dev, &reg_cfg_cmd[i],
 			cfg_data, proc_cmd->cmd_len);
 
 	if (copy_to_user(proc_cmd->cfg_data,
@@ -763,6 +790,12 @@ int msm_isp_cal_word_per_line(uint32_t output_format,
 	case V4L2_PIX_FMT_NV16:
 	case V4L2_PIX_FMT_NV61:
 		val = CAL_WORD(pixel_per_line, 1, 8);
+		break;
+	case V4L2_PIX_FMT_YUYV:
+	case V4L2_PIX_FMT_YVYU:
+	case V4L2_PIX_FMT_UYVY:
+	case V4L2_PIX_FMT_VYUY:
+		val = CAL_WORD(pixel_per_line, 2, 8);
 		break;
 		/*TD: Add more image format*/
 	default:

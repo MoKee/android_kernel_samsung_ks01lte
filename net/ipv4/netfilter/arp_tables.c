@@ -269,7 +269,6 @@ unsigned int arpt_do_table(struct sk_buff *skb,
 	outdev = out ? out->name : nulldevname;
 
 	local_bh_disable();
-	get_reader(&(table->private_lock));
 	addend = xt_write_recseq_begin();
 	private = table->private;
 	/*
@@ -347,7 +346,6 @@ unsigned int arpt_do_table(struct sk_buff *skb,
 			break;
 	} while (!acpar.hotdrop);
 	xt_write_recseq_end(addend);
-	put_reader(&(table->private_lock));
 	local_bh_enable();
 
 	if (acpar.hotdrop)
@@ -1046,8 +1044,10 @@ static int __do_replace(struct net *net, const char *name,
 
 	xt_free_table_info(oldinfo);
 	if (copy_to_user(counters_ptr, counters,
-			 sizeof(struct xt_counters) * num_counters) != 0)
-		ret = -EFAULT;
+			 sizeof(struct xt_counters) * num_counters) != 0) {
+		/* Silent error, can't fail, new table is already in place */
+		net_warn_ratelimited("arptables: counters copy to user failed while replacing table\n");
+	}
 	vfree(counters);
 	xt_table_unlock(t);
 	return ret;

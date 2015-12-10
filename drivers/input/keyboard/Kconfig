@@ -2,7 +2,7 @@
 # Input core configuration
 #
 menuconfig INPUT_KEYBOARD
-	bool "Keyboards" if EXPERT || !X86
+	bool "Keyboards"
 	default y
 	help
 	  Say Y here, and a list of supported keyboards will be displayed.
@@ -67,7 +67,7 @@ config KEYBOARD_ATARI
 	  module will be called atakbd.
 
 config KEYBOARD_ATKBD
-	tristate "AT keyboard" if EXPERT || !X86
+	tristate "AT keyboard"
 	default y
 	select SERIO
 	select SERIO_LIBPS2
@@ -627,6 +627,12 @@ config SENSORS_HALL
 	help
 	  Say Y here to enable the HALL
 
+config SENSORS_HALL_IRQ_CTRL
+        bool "SENSORS_HALL_IRQ_CTRL"
+	depends on !SEC_FACTORY
+	default n
+	help
+	  Say Y here to enable the IRQ control function
 
 source "drivers/input/keyboard/cypress_touchkey/Kconfig"
 source "drivers/input/keyboard/cypress_touchkey_h/Kconfig"

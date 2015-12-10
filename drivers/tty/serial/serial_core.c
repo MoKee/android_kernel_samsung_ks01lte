@@ -358,7 +358,7 @@ uart_get_baud_rate(struct uart_port *port, struct ktermios *termios,
 		 * The spd_hi, spd_vhi, spd_shi, spd_warp kludge...
 		 * Die! Die! Die!
 		 */
-		if (baud == 38400)
+		if (try == 0 && baud == 38400)
 			baud = altbaud;
 
 		/*
@@ -1266,9 +1266,6 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	port = &state->port;
 
 	pr_debug("uart_close(%d) called\n", uport->line);
-
-	if (uport->ops->pm)
-		uport->ops->pm(uport, 1, state->pm_state);
 
 	if (tty_port_close_start(port, tty, filp) == 0)
 		return;

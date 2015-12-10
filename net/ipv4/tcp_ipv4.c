@@ -81,7 +81,6 @@
 #include <linux/stddef.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/inetdevice.h>
 
 #include <linux/crypto.h>
 #include <linux/scatterlist.h>
@@ -177,7 +176,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (IS_ERR(rt)) {
 		err = PTR_ERR(rt);
 		if (err == -ENETUNREACH)
-			IP_INC_STATS_BH(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
+			IP_INC_STATS(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
 		return err;
 	}
 
@@ -1669,7 +1668,6 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	struct sock *sk;
 	int ret;
 	struct net *net = dev_net(skb->dev);
-	struct in_device *in_dev;
 
 	if (skb->pkt_type != PACKET_HOST)
 		goto discard_it;
@@ -1760,13 +1758,7 @@ no_tcp_socket:
 bad_packet:
 		TCP_INC_STATS_BH(net, TCP_MIB_INERRS);
 	} else {
-		in_dev = in_dev_get(skb->dev);
-		if (in_dev) {
-			if (!IN_DEV_FORWARD(in_dev))
-				tcp_v4_send_reset(NULL, skb);
-			in_dev_put(in_dev);
-		} else
-			tcp_v4_send_reset(NULL, skb);
+		tcp_v4_send_reset(NULL, skb);
 	}
 
 discard_it:

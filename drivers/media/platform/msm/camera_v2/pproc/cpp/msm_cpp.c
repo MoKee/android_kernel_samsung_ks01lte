@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -58,6 +58,15 @@
 
 extern int poweroff_charging;
 
+#define CPP_FW_VERSION_1_2_0	0x10020000
+#define CPP_FW_VERSION_1_4_0	0x10040000
+#define CPP_FW_VERSION_1_6_0	0x10060000
+#define CPP_FW_VERSION_1_8_0	0x10080000
+
+/* stripe information offsets in frame command */
+#define STRIPE_BASE_FW_1_2_0	130
+#define STRIPE_BASE_FW_1_4_0	140
+#define STRIPE_BASE_FW_1_6_0	464
 
 typedef struct _msm_cpp_timer_data_t {
 	struct cpp_device *cpp_dev;
@@ -272,7 +281,7 @@ static unsigned long msm_cpp_queue_buffer_info(struct cpp_device *cpp_dev,
 	}
 	rc = ion_map_iommu(cpp_dev->client, buff->map_info.ion_handle,
 		cpp_dev->domain_num, 0, SZ_4K, 0,
-		(unsigned long *)&buff->map_info.phy_addr,
+		&buff->map_info.phy_addr,
 		&buff->map_info.len, 0, 0);
 	if (rc < 0) {
 		pr_err("ION mmap failed\n");
@@ -936,7 +945,10 @@ static void cpp_load_fw(struct cpp_device *cpp_dev, char *fw_name_bin)
 
 		/*Start firmware loading*/
 		msm_cpp_write(MSM_CPP_CMD_FW_LOAD, cpp_dev->base);
-		msm_cpp_write(MSM_CPP_END_ADDRESS, cpp_dev->base);
+		if (fw)
+			msm_cpp_write(fw->size, cpp_dev->base);
+		else
+			msm_cpp_write(MSM_CPP_END_ADDRESS, cpp_dev->base);
 		msm_cpp_write(MSM_CPP_START_ADDRESS, cpp_dev->base);
 
 		if (ptr_bin) {
@@ -980,7 +992,8 @@ static void cpp_load_fw(struct cpp_device *cpp_dev, char *fw_name_bin)
 	msm_cpp_poll(cpp_dev->base, MSM_CPP_MSG_ID_CMD);
 	msm_cpp_poll(cpp_dev->base, 0x2);
 	msm_cpp_poll(cpp_dev->base, MSM_CPP_MSG_ID_FW_VER);
-	pr_info("CPP FW Version: 0x%x\n", msm_cpp_read(cpp_dev->base));
+	cpp_dev->fw_version = msm_cpp_read(cpp_dev->base);
+	pr_info("CPP FW Version: 0x%08x\n", cpp_dev->fw_version);
 	msm_cpp_poll(cpp_dev->base, MSM_CPP_MSG_ID_TRAILER);
 
 	/*Disable MC clock*/
@@ -1119,8 +1132,8 @@ static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev)
 	struct msm_buf_mngr_info buff_mgr_info;
 	int rc = 0;
 
-	if (queue->len > 0) {
-		frame_qcmd = msm_dequeue(queue, list_frame);
+	frame_qcmd = msm_dequeue(queue, list_frame);
+	if (frame_qcmd) {
 		processed_frame = frame_qcmd->command;
 		do_gettimeofday(&(processed_frame->out_time));
 		kfree(frame_qcmd);
@@ -1368,9 +1381,9 @@ static int msm_cpp_cfg(struct cpp_device *cpp_dev,
 	uint16_t num_stripes = 0;
 	struct msm_buf_mngr_info buff_mgr_info, dup_buff_mgr_info;
 	int32_t status = 0;
-	uint8_t fw_version_1_2_x = 0;
 	int32_t *ret_status = 0;
 
+	int32_t stripe_base = 0;
 	int i = 0;
 	if (!new_frame) {
 		pr_err("Insufficient memory. return\n");
@@ -1404,7 +1417,16 @@ static int msm_cpp_cfg(struct cpp_device *cpp_dev,
 	}
 
 	new_frame->cpp_cmd_msg = cpp_frame_msg;
-
+	if (cpp_frame_msg == NULL ||
+		(new_frame->msg_len < MSM_CPP_MIN_FRAME_LENGTH)) {
+		pr_err("%s %d Length is not correct or frame message is missing\n",
+			__func__, __LINE__);
+		return -EINVAL;
+	}
+	if (cpp_frame_msg[new_frame->msg_len - 1] != MSM_CPP_MSG_ID_TRAILER) {
+		pr_err("%s %d Invalid frame message\n", __func__, __LINE__);
+		return -EINVAL;
+	}
 	in_phyaddr = msm_cpp_fetch_buffer_info(cpp_dev,
 		&new_frame->input_buffer_info,
 		((new_frame->identity >> 16) & 0xFFFF),
@@ -1474,25 +1496,36 @@ static int msm_cpp_cfg(struct cpp_device *cpp_dev,
 		((cpp_frame_msg[12] >> 10) & 0x3FF) +
 		(cpp_frame_msg[12] & 0x3FF);
 
-	fw_version_1_2_x = 0;
-	if (cpp_dev->hw_info.cpp_hw_version == 0x10010000) {
-		fw_version_1_2_x = 2;
+	if ((cpp_dev->fw_version & 0xffff0000) ==
+		CPP_FW_VERSION_1_2_0) {
+		stripe_base = STRIPE_BASE_FW_1_2_0;
+	} else if ((cpp_dev->fw_version & 0xffff0000) ==
+		CPP_FW_VERSION_1_4_0) {
+		stripe_base = STRIPE_BASE_FW_1_4_0;
+	} else if ((cpp_dev->fw_version & 0xffff0000) ==
+		CPP_FW_VERSION_1_6_0) {
+		stripe_base = STRIPE_BASE_FW_1_6_0;
+	} else {
+		pr_err("invalid fw version %08x", cpp_dev->fw_version);
 	}
-#ifdef CONFIG_MACH_CHAGALL_KDI
-	else if (cpp_dev->hw_info.cpp_hw_version == CPP_HW_VERSION_1_1_1) {
-		fw_version_1_2_x = 2;
+
+	if ((stripe_base + num_stripes*27 + 1) != new_frame->msg_len) {
+		pr_err("Invalid frame message\n");
+		rc = -EINVAL;
+		goto ERROR3;
 	}
-#endif
+
+
 	for (i = 0; i < num_stripes; i++) {
-		cpp_frame_msg[(133 + fw_version_1_2_x) + i * 27] +=
+		cpp_frame_msg[stripe_base + 5 + i*27] +=
 			(uint32_t) in_phyaddr;
-		cpp_frame_msg[(139 + fw_version_1_2_x) + i * 27] +=
+		cpp_frame_msg[stripe_base + 11 + i * 27] +=
 			(uint32_t) out_phyaddr0;
-		cpp_frame_msg[(140 + fw_version_1_2_x) + i * 27] +=
+		cpp_frame_msg[stripe_base + 12 + i * 27] +=
 			(uint32_t) out_phyaddr1;
-		cpp_frame_msg[(141 + fw_version_1_2_x) + i * 27] +=
+		cpp_frame_msg[stripe_base + 13 + i * 27] +=
 			(uint32_t) out_phyaddr0;
-		cpp_frame_msg[(142 + fw_version_1_2_x) + i * 27] +=
+		cpp_frame_msg[stripe_base + 14 + i * 27] +=
 			(uint32_t) out_phyaddr1;
 	}
 
@@ -1838,8 +1871,6 @@ long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 		struct msm_queue_cmd *event_qcmd;
 		struct msm_cpp_frame_info_t *process_frame;
 		event_qcmd = msm_dequeue(queue, list_eventdata);
-		process_frame = event_qcmd->command;
-		CPP_DBG("fid %d\n", process_frame->frame_id);
 
 		if (ioctl_ptr->ioctl_ptr == NULL) {
 			pr_err("ioctl_ptr->ioctl_ptr is NULL\n");
@@ -1847,16 +1878,23 @@ long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 			return -EINVAL;
 		}
 
-		if (copy_to_user((void __user *)ioctl_ptr->ioctl_ptr,
-				process_frame,
-				sizeof(struct msm_cpp_frame_info_t))) {
-					mutex_unlock(&cpp_dev->mutex);
-					return -EINVAL;
-		}
+		if(event_qcmd) {
+			process_frame = event_qcmd->command;
+			CPP_DBG("fid %d\n", process_frame->frame_id);
+			if (copy_to_user((void __user *)ioctl_ptr->ioctl_ptr,
+					process_frame,
+					sizeof(struct msm_cpp_frame_info_t))) {
+						mutex_unlock(&cpp_dev->mutex);
+						return -EINVAL;
+			}
 
-		kfree(process_frame->cpp_cmd_msg);
-		kfree(process_frame);
-		kfree(event_qcmd);
+			kfree(process_frame->cpp_cmd_msg);
+			kfree(process_frame);
+			kfree(event_qcmd);
+		} else {
+			pr_err("Empty command list\n");
+			return -EFAULT;
+		}
 		break;
 	}
 	
@@ -1874,6 +1912,12 @@ long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 			return -EINVAL;
 		}
 
+		if (ioctl_ptr->len > sizeof(clock_rate)) {
+			pr_err("Not valid ioctl_ptr->len\n");
+			mutex_unlock(&cpp_dev->mutex);
+			return -EINVAL;
+		}
+
 		rc = (copy_from_user(&clock_rate,
 			(void __user *)ioctl_ptr->ioctl_ptr,
 			ioctl_ptr->len) ? -EFAULT : 0);
@@ -1883,10 +1927,19 @@ long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 			return -EINVAL;
 		}
 
-		if ((clock_rate == MSM_CPP_NOMINAL_CLOCK) ||
-			(clock_rate == MSM_CPP_TURBO_CLOCK)) {
-			pr_err("clk:%ld\n", clock_rate);
+		if (clock_rate > 0) {
+			clock_rate =
+				clk_round_rate(cpp_dev->cpp_clk[4], clock_rate);
+			CPP_DBG("clk:%ld\n", clock_rate);
 			clk_set_rate(cpp_dev->cpp_clk[4], clock_rate);
+			rc = msm_isp_update_bandwidth(ISP_CPP, clock_rate * 4,
+				clock_rate * 6);
+			if (rc < 0) {
+				pr_err("Bandwidth Set Failed!\n");
+				msm_isp_update_bandwidth(ISP_CPP, 0, 0);
+				mutex_unlock(&cpp_dev->mutex);
+				return -EINVAL;
+			}
 		}
 
 		break;
@@ -2154,6 +2207,7 @@ static int __devinit cpp_probe(struct platform_device *pdev)
 	cpp_dev->work =
 		(struct msm_cpp_work_t *)kmalloc(sizeof(struct msm_cpp_work_t),
 		GFP_KERNEL);
+
 	INIT_WORK((struct work_struct *)cpp_dev->work, msm_cpp_do_timeout_work);
 	cpp_dev->cpp_open_cnt = 0;
 	cpp_dev->is_firmware_loaded = 0;

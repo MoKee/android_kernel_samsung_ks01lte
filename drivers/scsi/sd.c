@@ -1415,6 +1415,7 @@ static unsigned int sd_completed_bytes(struct scsi_cmnd *scmd)
 {
 	u64 start_lba = blk_rq_pos(scmd->request);
 	u64 end_lba = blk_rq_pos(scmd->request) + (scsi_bufflen(scmd) / 512);
+	u64 factor = scmd->device->sector_size / 512;
 	u64 bad_lba;
 	int info_valid;
 	/*
@@ -1436,16 +1437,10 @@ static unsigned int sd_completed_bytes(struct scsi_cmnd *scmd)
 	if (scsi_bufflen(scmd) <= scmd->device->sector_size)
 		return 0;
 
-	if (scmd->device->sector_size < 512) {
-		/* only legitimate sector_size here is 256 */
-		start_lba <<= 1;
-		end_lba <<= 1;
-	} else {
-		/* be careful ... don't want any overflows */
-		u64 factor = scmd->device->sector_size / 512;
-		do_div(start_lba, factor);
-		do_div(end_lba, factor);
-	}
+	/* be careful ... don't want any overflows */
+	factor = scmd->device->sector_size / 512;
+	do_div(start_lba, factor);
+	do_div(end_lba, factor);
 
 	/* The bad lba was reported incorrectly, we have no idea where
 	 * the error is.
@@ -1976,8 +1971,7 @@ got_data:
 	if (sector_size != 512 &&
 	    sector_size != 1024 &&
 	    sector_size != 2048 &&
-	    sector_size != 4096 &&
-	    sector_size != 256) {
+	    sector_size != 4096) {
 		sd_printk(KERN_NOTICE, sdkp, "Unsupported sector size %d.\n",
 			  sector_size);
 		/*
@@ -2026,8 +2020,6 @@ got_data:
 		sdkp->capacity <<= 2;
 	else if (sector_size == 1024)
 		sdkp->capacity <<= 1;
-	else if (sector_size == 256)
-		sdkp->capacity >>= 1;
 
 	blk_queue_physical_block_size(sdp->request_queue,
 				      sdkp->physical_block_size);
@@ -2230,7 +2222,10 @@ sd_read_cache_type(struct scsi_disk *sdkp, unsigned char *buffer)
 		}
 
 		sdkp->DPOFUA = (data.device_specific & 0x10) != 0;
-		if (sdkp->DPOFUA && !sdkp->device->use_10_for_rw) {
+		if (sdp->broken_fua) {
+			sd_printk(KERN_NOTICE, sdkp, "Disabling FUA\n");
+			sdkp->DPOFUA = 0;
+		} else if (sdkp->DPOFUA && !sdkp->device->use_10_for_rw) {
 			sd_printk(KERN_NOTICE, sdkp,
 				  "Uses READ/WRITE(6), disabling FUA\n");
 			sdkp->DPOFUA = 0;
@@ -2602,8 +2597,10 @@ static void sd_scanpartition_async(void *data, async_cookie_t cookie)
 	struct device *ddev = disk_to_dev(gd);
 	struct disk_part_iter piter;
 	struct hd_struct *part;
+	unsigned long flags;
 	int err;
 
+	spin_lock_irqsave(&sdkp->thread_lock, flags);
 	/* delay uevents, until we scanned partition table */
 	dev_set_uevent_suppress(ddev, 1);
 
@@ -2646,7 +2643,8 @@ exit:
 		kobject_uevent(&part_to_dev(part)->kobj, KOBJ_ADD);
 	disk_part_iter_exit(&piter);
 
-	sdkp->async_end = 1;
+	atomic_set(&sdkp->async_end, 1);
+	spin_unlock_irqrestore(&sdkp->thread_lock, flags);
 	wake_up_interruptible(&sdkp->delay_wait);
 }
 
@@ -2654,13 +2652,15 @@ static int sd_media_scan_thread(void *__sdkp)
 {
 	struct scsi_disk *sdkp = __sdkp;
 	int ret;
-	sdkp->async_end = 1;
+	atomic_set(&sdkp->async_end, 1);
 	sdkp->device->changed = 0;
 
 	while (!kthread_should_stop()) {
 		wait_event_interruptible_timeout(sdkp->delay_wait,
-			(sdkp->thread_remove && sdkp->async_end), 3*HZ);
-		if (sdkp->thread_remove && sdkp->async_end)
+			(atomic_read(&sdkp->thread_remove) && 
+			 atomic_read(&sdkp->async_end)), 3*HZ);
+		if (atomic_read(&sdkp->thread_remove) && 
+			atomic_read(&sdkp->async_end))
 			break;
 
 		ret = sd_check_events(sdkp->disk, 0);
@@ -2672,7 +2672,7 @@ static int sd_media_scan_thread(void *__sdkp)
 					ret, sdkp->prv_media_present
 							, sdkp->media_present);
 			sdkp->disk->media_present = 0;
-			sdkp->async_end = 0;
+			atomic_set(&sdkp->async_end, 0);
 			async_schedule(sd_scanpartition_async, sdkp);
 			sdkp->prv_media_present = sdkp->media_present;
 		}
@@ -2850,7 +2850,8 @@ static int sd_probe(struct device *dev)
 	if (sdp->host->by_usb) {
 		init_waitqueue_head(&sdkp->delay_wait);
 		init_completion(&sdkp->scanning_done);
-		sdkp->thread_remove = 0;
+		spin_lock_init(&sdkp->thread_lock);
+		atomic_set(&sdkp->thread_remove, 0);
 		sdkp->th = kthread_create(sd_media_scan_thread,
 						sdkp, "sd-media-scan");
 		if (IS_ERR(sdkp->th)) {
@@ -2899,7 +2900,7 @@ static int sd_remove(struct device *dev)
 	sdkp->disk->media_present = 0;
 	sd_printk(KERN_INFO, sdkp, "%s\n", __func__);
 	if (sdkp->device->host->by_usb) {
-		sdkp->thread_remove = 1;
+		atomic_set(&sdkp->thread_remove, 1);
 		wake_up_interruptible(&sdkp->delay_wait);
 		wait_for_completion(&sdkp->scanning_done);
 		sd_printk(KERN_NOTICE, sdkp, "scan thread kill success\n");

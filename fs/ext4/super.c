@@ -889,6 +889,7 @@ static void ext4_put_super(struct super_block *sb)
 		dump_orphan_list(sb, sbi);
 	J_ASSERT(list_empty(&sbi->s_orphan));
 
+	sync_blockdev(sb->s_bdev);
 	invalidate_bdev(sb->s_bdev);
 	if (sbi->journal_bdev && sbi->journal_bdev != sb->s_bdev) {
 		/*
@@ -1042,7 +1043,7 @@ static struct inode *ext4_nfs_get_inode(struct super_block *sb,
 	 * Currently we don't know the generation for parent directory, so
 	 * a generation of 0 means "accept any"
 	 */
-	inode = ext4_iget(sb, ino);
+	inode = ext4_iget_normal(sb, ino);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 	if (generation && inode->i_generation != generation) {
@@ -1192,6 +1193,9 @@ enum {
 	Opt_inode_readahead_blks, Opt_journal_ioprio,
 	Opt_dioread_nolock, Opt_dioread_lock,
 	Opt_discard, Opt_nodiscard, Opt_init_itable, Opt_noinit_itable,
+#ifdef CONFIG_MACH_FIND7
+	Opt_uid, Opt_gid, Opt_dmask, Opt_fmask,
+#endif
 };
 
 static const match_table_t tokens = {
@@ -1270,6 +1274,12 @@ static const match_table_t tokens = {
 	{Opt_removed, "reservation"},	/* mount option from ext2/3 */
 	{Opt_removed, "noreservation"}, /* mount option from ext2/3 */
 	{Opt_removed, "journal=%u"},	/* mount option from ext2/3 */
+#ifdef CONFIG_MACH_FIND7
+	{Opt_uid, "uid=%u"},
+	{Opt_gid, "gid=%u"},
+	{Opt_dmask, "dmask=%o"},
+	{Opt_fmask, "fmask=%o"},
+#endif
 	{Opt_err, NULL},
 };
 
@@ -1466,6 +1476,20 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 	else if (token == Opt_offgrpjquota)
 		return clear_qf_name(sb, GRPQUOTA);
 #endif
+#ifdef CONFIG_MACH_FIND7
+	if (token == Opt_dmask) {
+		if (args->from && match_octal(args, &arg))
+			return -1;
+		sbi->s_dmask = arg;
+		return 1;
+	}
+	if (token == Opt_fmask) {
+		if (args->from && match_octal(args, &arg))
+			return -1;
+		sbi->s_fmask = arg;
+		return 1;
+	}
+#endif
 	if (args->from && match_int(args, &arg))
 		return -1;
 	switch (token) {
@@ -1504,6 +1528,14 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 			return -1;
 		*journal_ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, arg);
 		return 1;
+#ifdef CONFIG_MACH_FIND7
+	case Opt_uid:
+		sbi->s_uid = arg;
+		return 1;
+	case Opt_gid:
+		sbi->s_gid = arg;
+		return 1;
+#endif
 	}
 
 	for (m = ext4_mount_opts; m->token != Opt_err; m++) {
@@ -1643,13 +1675,6 @@ static int parse_options(char *options, struct super_block *sb,
 					"not specified");
 			return 0;
 		}
-	} else {
-		if (sbi->s_jquota_fmt) {
-			ext4_msg(sb, KERN_ERR, "journaled quota format "
-					"specified with no journaling "
-					"enabled");
-			return 0;
-		}
 	}
 #endif
 	if (test_opt(sb, DIOREAD_NOLOCK)) {
@@ -1785,6 +1810,17 @@ static int _ext4_show_options(struct seq_file *seq, struct super_block *sb,
 	if (nodefs || (test_opt(sb, INIT_INODE_TABLE) &&
 		       (sbi->s_li_wait_mult != EXT4_DEF_LI_WAIT_MULT)))
 		SEQ_OPTS_PRINT("init_itable=%u", sbi->s_li_wait_mult);
+
+#ifdef CONFIG_MACH_FIND7
+	if (nodefs || sbi->s_uid != 0)
+		SEQ_OPTS_PRINT("uid=%d", sbi->s_uid);
+	if (nodefs || sbi->s_gid != 0)
+		SEQ_OPTS_PRINT("gid=%d", sbi->s_gid);
+	if (nodefs || (sbi->s_fmask != 0 || sbi->s_dmask != 0)) {
+		SEQ_OPTS_PRINT("dmask=%04o", sbi->s_dmask);
+		SEQ_OPTS_PRINT("fmask=%04o", sbi->s_fmask);
+	}
+#endif
 
 	ext4_show_quota_options(seq, sb);
 	return 0;
@@ -2590,10 +2626,11 @@ static void print_daily_error_info(unsigned long arg)
 	es = sbi->s_es;
 
 	if (es->s_error_count)
-		ext4_msg(sb, KERN_NOTICE, "error count: %u",
+		/* fsck newer than v1.41.13 is needed to clean this condition. */
+		ext4_msg(sb, KERN_NOTICE, "error count since last fsck: %u",
 			 le32_to_cpu(es->s_error_count));
 	if (es->s_first_error_time) {
-		printk(KERN_NOTICE "EXT4-fs (%s): initial error at %u: %.*s:%d",
+		printk(KERN_NOTICE "EXT4-fs (%s): initial error at time %u: %.*s:%d",
 		       sb->s_id, le32_to_cpu(es->s_first_error_time),
 		       (int) sizeof(es->s_first_error_func),
 		       es->s_first_error_func,
@@ -2607,7 +2644,7 @@ static void print_daily_error_info(unsigned long arg)
 		printk("\n");
 	}
 	if (es->s_last_error_time) {
-		printk(KERN_NOTICE "EXT4-fs (%s): last error at %u: %.*s:%d",
+		printk(KERN_NOTICE "EXT4-fs (%s): last error at time %u: %.*s:%d",
 		       sb->s_id, le32_to_cpu(es->s_last_error_time),
 		       (int) sizeof(es->s_last_error_func),
 		       es->s_last_error_func,
@@ -2957,54 +2994,6 @@ static void ext4_destroy_lazyinit_thread(void)
 		return;
 
 	kthread_stop(ext4_lazyinit_task);
-}
-void print_block_data(struct super_block *sb, sector_t blocknr
-						, unsigned char *data_to_dump, int start, int len)
-{
-	int i, j;
-	int bh_offset = (start / 16) * 16;
-	char row_data[17] = { 0, };
-	char row_hex[50] = { 0, };
-	char ch;
-
-	printk(KERN_ERR "As EXT4-fs error, printing data in hex\n");
-	printk(KERN_ERR " [partition info] s_id : %s, start block# : %llu\n"
-			, sb->s_id, sb->s_bdev->bd_part->start_sect);
-	printk(KERN_ERR " dump block# : %llu, start offset(byte) :", blocknr);
-	printk(KERN_ERR " %d, length(byte) : %d\n", start, len);
-	printk(KERN_ERR "-------------------------------------------------\n");
-
-	for (i = 0; i < (len + 15) / 16; i++) {
-		for (j = 0; j < 16; j++) {
-			ch = *(data_to_dump + bh_offset + j);
-			if (start <= bh_offset + j
-				&& start + len > bh_offset + j) {
-
-				if (isascii(ch) && isprint(ch))
-					sprintf(row_data + j, "%c", ch);
-				else
-					sprintf(row_data + j, ".");
-
-				sprintf(row_hex + (j * 3), "%2.2x ", ch);
-				} else {
-					sprintf(row_data + j, " ");
-					sprintf(row_hex + (j * 3), "-- ");
-				}
-			}
-
-			printk(KERN_ERR "0x%4.4x : %s | %s\n"
-					, bh_offset, row_hex, row_data);
-			bh_offset += 16;
-		}
-		printk(KERN_ERR "---------------------------------------------------\n");
-}
-/* for debugging */
-
-// debugging code
-void print_bh(struct super_block *sb, struct buffer_head *bh
-				, int start, int len)
-{
-	print_block_data(sb, bh->b_blocknr, bh->b_data, start, len);
 }
 
 /*
@@ -3419,16 +3408,22 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	for (i = 0; i < 4; i++)
 		sbi->s_hash_seed[i] = le32_to_cpu(es->s_hash_seed[i]);
 	sbi->s_def_hash_version = es->s_def_hash_version;
-	i = le32_to_cpu(es->s_flags);
-	if (i & EXT2_FLAGS_UNSIGNED_HASH)
-		sbi->s_hash_unsigned = 3;
-	else if ((i & EXT2_FLAGS_SIGNED_HASH) == 0) {
+	if (EXT4_HAS_COMPAT_FEATURE(sb, EXT4_FEATURE_COMPAT_DIR_INDEX)) {
+		i = le32_to_cpu(es->s_flags);
+		if (i & EXT2_FLAGS_UNSIGNED_HASH)
+			sbi->s_hash_unsigned = 3;
+		else if ((i & EXT2_FLAGS_SIGNED_HASH) == 0) {
 #ifdef __CHAR_UNSIGNED__
-		es->s_flags |= cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH);
-		sbi->s_hash_unsigned = 3;
+			if (!(sb->s_flags & MS_RDONLY))
+				es->s_flags |=
+					cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH);
+			sbi->s_hash_unsigned = 3;
 #else
-		es->s_flags |= cpu_to_le32(EXT2_FLAGS_SIGNED_HASH);
+			if (!(sb->s_flags & MS_RDONLY))
+				es->s_flags |=
+					cpu_to_le32(EXT2_FLAGS_SIGNED_HASH);
 #endif
+		}
 	}
 
 	/* Handle clustersize */
@@ -3854,15 +3849,8 @@ no_journal:
 	return 0;
 
 cantfind_ext4:
-
-	/* If you wanna use the flag 'MS_SILENT', call */
-	/* 'print_bh' function within below 'if'. */
-	printk(KERN_ERR "printing data of superblock-bh\n");
-	print_bh(sb, bh, 0, EXT4_BLOCK_SIZE(sb));
-
 	if (!silent)
 		ext4_msg(sb, KERN_ERR, "VFS: Can't find ext4 filesystem");
-
 	goto failed_mount;
 
 failed_mount7:
@@ -4404,6 +4392,12 @@ struct ext4_mount_options {
 	unsigned long s_mount_opt2;
 	uid_t s_resuid;
 	gid_t s_resgid;
+#ifdef CONFIG_MACH_FIND7
+	uid_t s_uid;
+	gid_t s_gid;
+	unsigned short s_dmask;
+	unsigned short s_fmask;
+#endif
 	unsigned long s_commit_interval;
 	u32 s_min_batch_time, s_max_batch_time;
 #ifdef CONFIG_QUOTA
@@ -4434,6 +4428,12 @@ static int ext4_remount(struct super_block *sb, int *flags, char *data)
 	old_opts.s_mount_opt2 = sbi->s_mount_opt2;
 	old_opts.s_resuid = sbi->s_resuid;
 	old_opts.s_resgid = sbi->s_resgid;
+#ifdef CONFIG_MACH_FIND7
+	old_opts.s_uid = sbi->s_uid;
+	old_opts.s_gid = sbi->s_gid;
+	old_opts.s_dmask = sbi->s_dmask;
+	old_opts.s_fmask = sbi->s_fmask;
+#endif
 	old_opts.s_commit_interval = sbi->s_commit_interval;
 	old_opts.s_min_batch_time = sbi->s_min_batch_time;
 	old_opts.s_max_batch_time = sbi->s_max_batch_time;
@@ -4606,6 +4606,12 @@ restore_opts:
 	sbi->s_mount_opt2 = old_opts.s_mount_opt2;
 	sbi->s_resuid = old_opts.s_resuid;
 	sbi->s_resgid = old_opts.s_resgid;
+#ifdef CONFIG_MACH_FIND7
+	sbi->s_uid = old_opts.s_uid;
+	sbi->s_gid = old_opts.s_gid;
+	sbi->s_dmask = old_opts.s_dmask;
+	sbi->s_fmask = old_opts.s_fmask;
+#endif
 	sbi->s_commit_interval = old_opts.s_commit_interval;
 	sbi->s_min_batch_time = old_opts.s_min_batch_time;
 	sbi->s_max_batch_time = old_opts.s_max_batch_time;

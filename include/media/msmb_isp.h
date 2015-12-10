@@ -240,6 +240,8 @@ enum msm_vfe_reg_cfg_type {
 	GET_SOC_HW_VER,
 	GET_MAX_CLK_RATE,
 #endif
+	VFE_HW_UPDATE_LOCK,
+	VFE_HW_UPDATE_UNLOCK,
 };
 
 struct msm_vfe_cfg_cmd2 {

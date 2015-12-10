@@ -751,6 +751,8 @@ do {									       \
 	if (EXT4_FITS_IN_INODE(raw_inode, einode, xtime))		       \
 		(einode)->xtime.tv_sec = 				       \
 			(signed)le32_to_cpu((raw_inode)->xtime);	       \
+	else								       \
+		(einode)->xtime.tv_sec = 0;				       \
 	if (EXT4_FITS_IN_INODE(raw_inode, einode, xtime ## _extra))	       \
 		ext4_decode_extra_time(&(einode)->xtime,		       \
 				       raw_inode->xtime ## _extra);	       \
@@ -1154,6 +1156,12 @@ struct ext4_sb_info {
 	ext4_fsblk_t s_sb_block;
 	uid_t s_resuid;
 	gid_t s_resgid;
+#ifdef CONFIG_MACH_FIND7
+	uid_t s_uid;
+	gid_t s_gid;
+	unsigned short s_dmask;
+	unsigned short s_fmask;
+#endif
 	unsigned short s_mount_state;
 	unsigned short s_pad;
 	int s_addr_per_block_bits;
@@ -1672,7 +1680,7 @@ ext4_group_first_block_no(struct super_block *sb, ext4_group_t group_no)
 /*
  * Special error return code only used by dx_probe() and its callers.
  */
-#define ERR_BAD_DX_DIR	-75000
+#define ERR_BAD_DX_DIR	(-(MAX_ERRNO - 1))
 
 void ext4_get_group_no_and_offset(struct super_block *sb, ext4_fsblk_t blocknr,
 			ext4_group_t *blockgrpp, ext4_grpblk_t *offsetp);
@@ -1890,6 +1898,7 @@ int ext4_get_block(struct inode *inode, sector_t iblock,
 				struct buffer_head *bh_result, int create);
 
 extern struct inode *ext4_iget(struct super_block *, unsigned long);
+extern struct inode *ext4_iget_normal(struct super_block *, unsigned long);
 extern int  ext4_write_inode(struct inode *, struct writeback_control *);
 extern int  ext4_setattr(struct dentry *, struct iattr *);
 extern int  ext4_getattr(struct vfsmount *mnt, struct dentry *dentry,
@@ -2030,11 +2039,6 @@ extern __le16 ext4_group_desc_csum(struct ext4_sb_info *sbi, __u32 group,
 				   struct ext4_group_desc *gdp);
 extern int ext4_group_desc_csum_verify(struct ext4_sb_info *sbi, __u32 group,
 				       struct ext4_group_desc *gdp);
-extern void print_bh(struct super_block *sb,
-			struct buffer_head *bh, int start, int len);
-extern void print_block_data(struct super_block *sb, sector_t blocknr,
-			unsigned char *data_to_dump, int start, int len);
-
 
 static inline ext4_fsblk_t ext4_blocks_count(struct ext4_super_block *es)
 {
@@ -2357,6 +2361,32 @@ static inline void set_bitmap_uptodate(struct buffer_head *bh)
 }
 
 #define in_range(b, first, len)	((b) >= (first) && (b) <= (first) + (len) - 1)
+
+#ifdef CONFIG_MACH_FIND7
+static inline umode_t ext4_make_mode(struct ext4_sb_info *ei, umode_t i_mode)
+{
+	umode_t mode;
+	if (S_ISDIR(i_mode) || (i_mode == 0)) {
+		mode = (S_IRWXUGO & ~ei->s_dmask) | S_IFDIR;
+	}
+	else {
+		mode = (S_IRWXUGO & ~ei->s_fmask) | S_IFREG;
+	}
+	return mode;
+}
+static inline void ext4_fill_inode(struct super_block *sb, struct inode *inode)
+{
+	if (EXT4_SB(sb)->s_dmask  || EXT4_SB(sb)->s_fmask) {
+		inode->i_mode = ext4_make_mode(EXT4_SB(sb), inode->i_mode);
+	}
+	if (EXT4_SB(sb)->s_uid) {
+		inode->i_uid = EXT4_SB(sb)->s_uid;
+	}
+	if (EXT4_SB(sb)->s_gid) {
+		inode->i_gid = EXT4_SB(sb)->s_gid;
+	}
+}
+#endif
 
 /* For ioend & aio unwritten conversion wait queues */
 #define EXT4_WQ_HASH_SZ		37

@@ -49,6 +49,10 @@
 #define MAX_POLLING_SLEEP (6050)
 #define MIN_POLLING_SLEEP (950)
 
+#ifdef BAM_DMUX_FD
+static unsigned int wakelock_timeout;
+#endif
+
 static int msm_bam_dmux_debug_enable;
 module_param_named(debug_enable, msm_bam_dmux_debug_enable,
 		   int, S_IRUGO | S_IWUSR | S_IWGRP);
@@ -228,9 +232,11 @@ static struct srcu_struct bam_dmux_srcu;
 
 /* A2 power collaspe */
 #define UL_TIMEOUT_DELAY 1000	/* in ms */
+#define UL_FAST_TIMEOUT_DELAY 100 /* in ms */
 #define ENABLE_DISCONNECT_ACK	0x1
-#define SHUTDOWN_TIMEOUT_MS	500
+#define SHUTDOWN_TIMEOUT_MS	3000
 #define UL_WAKEUP_TIMEOUT_MS	2000
+static uint32_t ul_timeout_delay = UL_TIMEOUT_DELAY;
 static void toggle_apps_ack(void);
 static void reconnect_to_bam(void);
 static void disconnect_to_bam(void);
@@ -1607,7 +1613,7 @@ static void ul_timeout(struct work_struct *work)
 	ret = write_trylock_irqsave(&ul_wakeup_lock, flags);
 	if (!ret) { /* failed to grab lock, reschedule and bail */
 		schedule_delayed_work(&ul_timeout_work,
-				msecs_to_jiffies(UL_TIMEOUT_DELAY));
+				msecs_to_jiffies(ul_timeout_delay));
 		return;
 	}
 	if (bam_is_connected) {
@@ -1631,7 +1637,7 @@ static void ul_timeout(struct work_struct *work)
 				__func__, ul_packet_written);
 			ul_packet_written = 0;
 			schedule_delayed_work(&ul_timeout_work,
-					msecs_to_jiffies(UL_TIMEOUT_DELAY));
+					msecs_to_jiffies(ul_timeout_delay));
 		} else {
 			ul_powerdown();
 		}
@@ -1717,7 +1723,7 @@ static void ul_wakeup(void)
 		if (likely(do_vote_dfab))
 			vote_dfab();
 		schedule_delayed_work(&ul_timeout_work,
-				msecs_to_jiffies(UL_TIMEOUT_DELAY));
+				msecs_to_jiffies(ul_timeout_delay));
 		bam_is_connected = 1;
 		mutex_unlock(&wakeup_lock);
 		return;
@@ -1762,7 +1768,7 @@ static void ul_wakeup(void)
 	bam_is_connected = 1;
 	BAM_DMUX_LOG("%s complete\n", __func__);
 	schedule_delayed_work(&ul_timeout_work,
-				msecs_to_jiffies(UL_TIMEOUT_DELAY));
+				msecs_to_jiffies(ul_timeout_delay));
 	mutex_unlock(&wakeup_lock);
 }
 
@@ -1962,8 +1968,12 @@ static void release_wakelock(void)
 	BAM_DMUX_LOG("%s: ref count = %d\n", __func__,
 						wakelock_reference_count);
 	--wakelock_reference_count;
-	if (wakelock_reference_count == 0)
+	if (wakelock_reference_count == 0) {
 		wake_unlock(&bam_wakelock);
+#ifdef BAM_DMUX_FD
+		wake_lock_timeout(&bam_wakelock, wakelock_timeout * HZ);
+#endif
+	}
 	spin_unlock_irqrestore(&wakelock_reference_lock, flags);
 }
 
@@ -2461,14 +2471,21 @@ static int bam_dmux_probe(struct platform_device *pdev)
 			num_buffers = DEFAULT_NUM_BUFFERS;
 		}
 
-		DBG("%s: base:%p size:%x irq:%d satellite:%d num_buffs:%d\n",
+		rc = of_property_read_bool(pdev->dev.of_node,
+						"qcom,fast-shutdown");
+		if (rc) {
+			ul_timeout_delay = UL_FAST_TIMEOUT_DELAY;
+		}
+
+		DBG("%s: base:%p size:%x irq:%d satellite:%d num_buffs:%d ul_timeout_delay:%d\n",
 							__func__,
 							a2_phys_base,
 							a2_phys_size,
 							a2_bam_irq,
 							satellite_mode,
-							num_buffers);
-	} else { /* fallback to default init data */
+							num_buffers,
+							ul_timeout_delay);
+	} else { 
 		a2_phys_base = (void *)(A2_PHYS_BASE);
 		a2_phys_size = A2_PHYS_SIZE;
 		a2_bam_irq = A2_BAM_IRQ;
@@ -2579,6 +2596,38 @@ static struct platform_driver bam_dmux_driver = {
 	},
 };
 
+#ifdef BAM_DMUX_FD
+struct device *bamDmux_pkt_dev;
+
+static ssize_t show_waketime(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	if (!bamDmux_pkt_dev)
+		return 0;
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", wakelock_timeout);
+}
+
+static ssize_t store_waketime(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	int r;
+	unsigned long msec;
+	if (!bamDmux_pkt_dev)
+		return count;
+
+	r = kstrtoul(buf, 10, &msec);
+
+	if (r)
+		return count;
+
+	wakelock_timeout = (msec/1000);
+	return count;
+}
+
+static DEVICE_ATTR(waketime, 0664, show_waketime, store_waketime);
+#endif
+
 static int __init bam_dmux_init(void)
 {
 #ifdef CONFIG_DEBUG_FS
@@ -2590,6 +2639,18 @@ static int __init bam_dmux_init(void)
 		debug_create("ul_pkt_cnt", 0444, dent, debug_ul_pkt_cnt);
 		debug_create("stats", 0444, dent, debug_stats);
 	}
+#endif
+
+#ifdef BAM_DMUX_FD
+	wakelock_timeout = 0;
+	bamDmux_pkt_dev = device_create(sec_class, NULL, 0, NULL, "bamdmux");
+	if (IS_ERR(bamDmux_pkt_dev))
+		pr_err("%s: Failed to create device(bamDmux_pkt_dev)!\n",
+			__func__);
+
+	if (device_create_file(bamDmux_pkt_dev, &dev_attr_waketime) < 0)
+		pr_err("%s: Failed to create device file(%s)!\n",
+			__func__, dev_attr_waketime.attr.name);
 #endif
 
 	bam_ipc_log_txt = ipc_log_context_create(BAM_IPC_LOG_PAGES, "bam_dmux",
